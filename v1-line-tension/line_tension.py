@@ -157,37 +157,6 @@ def mura_self_stress(kappa: np.ndarray) -> np.ndarray:
     return sh[..., None, None] * eye3
 
 
-def compute_total_hydrostatic_stress(
-    kappa: np.ndarray,
-) -> np.ndarray:
-    """Hydrostatic stress ``sigma_h(kappa)`` driving lattice hydrogen (Pa).
-
-    The local hydrostatic stress field at the defect is defined ENTIRELY by the
-    Mura line-integral output based on curvature. The macroscopic external
-    pressure ``P_ext`` is NOT superposed onto the microscopic dislocation
-    self-stress: ``P_ext`` only drives the boundary fugacity (through the
-    surface concentration ``C_s``), never the local hydrostatic field. Hence
-
-        R(kappa)                  = 1 / kappa
-        sigma_h(kappa)            = sigma_h^{Mura_Self}(kappa)   [external input]
-
-    with no ``P_ext`` term, and the stress-assisted lattice concentration is
-
-        c_L = C_s exp(V_H sigma_h(kappa) / (R T)) .
-
-    ``sigma_h^{Mura_Self}(kappa)`` is the hydrostatic self-stress taken as an
-    EXTERNAL INPUT from the prior numerical Mura line-integral solution (see
-    :func:`get_mura_self_stress`); the mechanical side is NOT re-derived here.
-
-    Args:
-        kappa: Dislocation curvature (1/m), strictly positive, any shape.
-
-    Returns:
-        Hydrostatic stress ``sigma_h`` in Pa, same shape as ``kappa``.
-    """
-    return get_mura_self_stress(kappa)
-
-
 def elastic_strain_energy_density(
     sigma_tensor: np.ndarray,
     mu: float = C.MU,
@@ -416,7 +385,6 @@ __all__: Tuple[str, ...] = (
     "get_mura_self_stress",
     "set_mura_self_stress_provider",
     "mura_self_stress",
-    "compute_total_hydrostatic_stress",
     "elastic_strain_energy_density",
     "total_free_energy_density",
     "integrate_energy_density",

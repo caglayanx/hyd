@@ -17,13 +17,13 @@ The free-energy chain implemented here is:
     4. Oriani trap equilibrium  -> theta_T(k) from theta_L = c_L / N_L
     5. Configurational free energy  -> Psi_conf(c_L)
     6. Trap-binding free energy     -> Psi_trap(theta_T)
-    7. Total hydrostatic stress + mechanical line energy
+    7. Hydrostatic stress (Mura) + mechanical line energy
          R(k)                  = 1/kappa
-         sigma_h(k)            = sigma_h^{Mura_Self}(k)   [external numerical input]
-         (NO P_ext superposition: P_ext only drives the boundary fugacity C_s)
+         sigma_h(k)            = sigma_h^{Mura_Self}(k)   [sole mechanical-stress input]
+         (NO "total" wrapper, NO P_ext superposition, NO added line-tension stress)
          Gamma_mech(k)         = mu b^2/(4 pi (1-nu)) * ln(R(k)/r_c)
     8. Hydrogen line-energy reduction  -> Gamma_H(k) (closed form, Kirchheim)
-         c_L(k) = C_s exp(V_H sigma_h(k) / (R T))   (sigma_h = Mura self-stress only)
+         c_L(k) = C_s exp(V_H sigma_h^{Mura_Self}(k) / (R T))
     9. Total line tension             -> Gamma(k) = Gamma_mech(k) + Gamma_H(k)
 
 Every stress and energy function below is parameterised by the dislocation
@@ -70,7 +70,6 @@ from line_tension import (
     get_mura_self_stress,
     set_mura_self_stress_provider,
     mura_self_stress,
-    compute_total_hydrostatic_stress,
 )
 
 # ===========================================================================
@@ -162,8 +161,11 @@ def mechanical_line_tension(kappa: np.ndarray) -> np.ndarray:
 # The macroscopic external pressure P_ext is NOT superposed onto the
 # microscopic dislocation self-stress (that would be a physical redundancy):
 # P_ext only drives the boundary fugacity through the surface concentration
-# C_s (Sieverts/Abel-Noble), never the local hydrostatic field. See
-# :func:`line_tension.compute_total_hydrostatic_stress`.
+# C_s (Sieverts/Abel-Noble), never the local hydrostatic field. There is NO
+# "total" stress wrapper and NO separate line-tension stress/energy added on
+# top of the Mura output: the Mura integral already accounts for the exact
+# curved geometry, so any superposition would be unphysical double-counting.
+# The sole mechanical-stress API is :func:`line_tension.get_mura_self_stress`.
 # ---------------------------------------------------------------------------
 
 
@@ -216,8 +218,8 @@ def hydrogen_line_energy(kappa: float, n_radial: int = 2048) -> float:
     r_c = C.CORE_RADIUS
     A_atm = float(np.pi * (R_atm ** 2 - r_c ** 2))    # atmosphere cross-section per unit length
 
-    # Local hydrostatic stress: Mura self-stress ONLY (no P_ext superposition).
-    sigma_h = float(compute_total_hydrostatic_stress(kappa))
+    # Local hydrostatic stress: raw Mura self-stress ONLY (no superposition).
+    sigma_h = float(get_mura_self_stress(kappa))
     # Stress-assisted lattice concentration driven by sigma_h (Mura only).
     c_lattice = float(stress_assisted_lattice_concentration(np.array(sigma_h)))
     theta_t = float(H.oriani_trap_occupancy(np.array(c_lattice), T_FIXED))
@@ -314,16 +316,17 @@ def report_line_tension(kappa: np.ndarray, g_mech, g_h, g_tot) -> None:
     # Sample logarithmically across the grid for a readable table.
     idx = np.logspace(np.log10(1), np.log10(len(kappa)), num=8).astype(int) - 1
     idx = np.clip(idx, 0, len(kappa) - 1)
-    sh = compute_total_hydrostatic_stress(kappa)   # sigma_h(k) = Mura self-stress (Pa)
+    sh = get_mura_self_stress(kappa)   # sigma_h(k) = raw Mura self-stress (Pa)
     for i in idx:
         r_nm = 1.0 / kappa[i] * 1e9
         print(f"{kappa[i]:14.3e} {r_nm:10.2f} {sh[i] / 1e9:16.4f} "
               f"{g_mech[i] * 1e9:16.4f} {g_h[i] * 1e9:14.4f} {g_tot[i] * 1e9:12.4f}")
     print("=" * 88)
     print("  sigma_h(kappa) = sigma_h^{Mura_Self}(kappa),  R(kappa) = 1/kappa")
-    print("  sigma_h^{Mura_Self}(kappa): external numerical input (Mura line-integral), NOT re-derived")
-    print("  NO P_ext superposition: P_ext only drives the boundary fugacity C_s (Abel-Noble/Sieverts).")
-    print("  c_L = C_s * exp(V_H sigma_h / (R T))  (sigma_h = Mura self-stress, scales with kappa)")
+    print("  Driving stress is EXCLUSIVELY sigma_h^{Mura_Self}(kappa) (Mura line-integral, NOT re-derived).")
+    print("  NO 'total' superposition: no P_ext, no added line-tension stress/energy on top of Mura.")
+    print("  P_ext only drives the boundary fugacity C_s (Abel-Noble/Sieverts).")
+    print("  c_L = C_s * exp(V_H sigma_h^{Mura_Self} / (R T))  (raw Mura output scales with kappa)")
     print("  Gamma_H < 0 confirms hydrogen-induced line-tension DEGRADATION.")
     print("  Larger kappa (tighter bowing) -> deeper reduction (line-tension degradation).")
     print("=" * 88)
@@ -348,8 +351,8 @@ def plot_line_tension(kappa, g_mech, g_h, g_tot, out_path: str) -> None:
     ax.set_xlabel(r"Dislocation curvature  $\kappa = 1/R$  (m$^{-1}$)", fontsize=12)
     ax.set_ylabel(r"Line tension  $\Gamma$  (nN)", fontsize=12)
     ax.set_title(
-        r"H-induced line-tension degradation, $\sigma_h(\kappa)=\sigma_h^{\mathrm{Mura}}(\kappa)$"
-        r" (no $P_{\mathrm{ext}}$ superposition), 30CrMo, "
+        r"H-induced line-tension degradation, driving stress $\sigma_h(\kappa)=\sigma_h^{\mathrm{Mura}}(\kappa)$"
+        r" exclusively (no 'total' superposition), 30CrMo, "
         f"$T={T_FIXED - 273.15:.0f}^\\circ$C, $P_{{\\mathrm{{ext}}}}={P_FIXED / 1e6:.0f}$ MPa)",
         fontsize=10,
     )
@@ -371,14 +374,16 @@ def main() -> None:
     report_state(state)
 
     # Curvature grid: from ~straight (R ~ 5 um) to the elastic limit where the
-    # total line tension is still positive. The local hydrostatic stress
-    # sigma_h(kappa) = sigma_h^{Mura_Self}(kappa) (Mura self-stress ONLY, NO
-    # P_ext superposition) drives the lattice concentration
-    # c_L = C_s exp(V_H sigma_h / (R T)); the configurational free-energy excess
-    # keeps Gamma_mech + Gamma_H positive only up to kappa ~ 7.1e6 1/m. The
-    # upper bound kappa_max = 6.0e6 (R ~ 167 nm) keeps Gamma_total safely above
-    # zero while resolving the full degradation trend, with the peak lattice
-    # occupancy well below unity (continuum elastic regime).
+    # line tension Gamma = Gamma_mech + Gamma_H is still positive. The local
+    # hydrostatic stress sigma_h(kappa) = sigma_h^{Mura_Self}(kappa) is the RAW
+    # Mura line-integral output (sole mechanical-stress input, NO "total"
+    # superposition, NO P_ext, NO added line-tension stress) and drives the
+    # lattice concentration c_L = C_s exp(V_H sigma_h / (R T)); the
+    # configurational free-energy excess keeps Gamma_mech + Gamma_H positive
+    # only up to kappa ~ 7.1e6 1/m. The upper bound kappa_max = 6.0e6
+    # (R ~ 167 nm) keeps Gamma_total safely above zero while resolving the full
+    # degradation trend, with the peak lattice occupancy well below unity
+    # (continuum elastic regime).
     kappa_min = 1.0 / (5.0e-6)          # R = 5 um  -> kappa ~ 2e5 1/m
     kappa_max = 6.0e6                   # R ~ 167 nm -> elastic, unsaturated, Gamma > 0
     kappa = np.logspace(np.log10(kappa_min), np.log10(kappa_max), 80)
