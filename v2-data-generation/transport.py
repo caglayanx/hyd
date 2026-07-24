@@ -22,6 +22,15 @@ import constants as C
 import hydrogen_thermo as ht
 
 
+def diffusion_coefficient(T: float, D_0: float = C.D_0, E_A: float = C.E_A) -> float:
+    """Temperature-dependent lattice diffusivity ``D(T)`` (m^2/s), Arrhenius.
+
+    ``D(T) = D_0 exp(-E_A / (R T))``. Calibrated so that
+    ``D_0 exp(-E_A/(R*298.15)) == D_L`` (4.0e-11 m^2/s at 298 K).
+    """
+    return D_0 * float(np.exp(-E_A / (C.R * float(T))))
+
+
 def hydrogen_flux(grad_cL: np.ndarray, cL: np.ndarray, grad_sigma_h: np.ndarray,
                   T: float, D: float = C.D_L, V_H: float = C.V_H) -> np.ndarray:
     """Stress-assisted hydrogen flux ``J`` (mol / (m^2 s)).
@@ -43,4 +52,4 @@ def oriari_update(cL: np.ndarray, T: float) -> np.ndarray:
     return ht.trapped_concentration(cL, T)
 
 
-__all__ = ("hydrogen_flux", "transport_time_derivative", "oriari_update")
+__all__ = ("diffusion_coefficient", "hydrogen_flux", "transport_time_derivative", "oriari_update")

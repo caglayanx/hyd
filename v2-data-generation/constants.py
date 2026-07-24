@@ -32,6 +32,8 @@ K_0: float = 7.1e-5 / float(np.exp(-28600.0 / (8.3145 * 298.15)))  # Sieverts pr
 H_S: float = 28600.0             # Heat of solution of H in alpha-Fe (J/mol)
 K_S_298: float = 7.1e-5           # Sieverts coefficient at 298.15 K (mol/(m^3 Pa^0.5))
 D_L: float = 4.0e-11             # Lattice diffusion coefficient at 298 K (m^2/s)
+D_0: float = 1.40e-7             # Arrhenius pre-exponential diffusion coefficient (m^2/s)
+E_A: float = 16000.0            # Arrhenius activation energy (J/mol) -> 16 kJ/mol
 V_H: float = 2.0e-6              # Partial molar volume of hydrogen (m^3/mol)
 
 # ---------------------------------------------------------------------------
@@ -61,7 +63,7 @@ P_REF: float = 35.0e6            # Reference pressure (Pa) = 35 MPa
 __all__ = [
     "R", "N_AVOG",
     "T_C_H2", "P_C_H2", "OMEGA_H2",
-    "K_0", "H_S", "K_S_298", "D_L", "V_H",
+    "K_0", "H_S", "K_S_298", "D_L", "D_0", "E_A", "V_H",
     "DELTA_G_B", "N_L", "N_T",
     "MU", "NU", "E_YOUNG", "BURGERS_B", "CORE_RADIUS", "RHO_0",
     "T_REF", "P_REF",

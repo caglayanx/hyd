@@ -25,6 +25,169 @@ import constants as C
 from hydrogen import hydrogen_free_energy_density
 
 
+# ---------------------------------------------------------------------------
+# Curvature parameterisation: R(kappa) = 1/kappa.
+#
+# Per reviewer feedback, every stress and energy calculation below takes the
+# dislocation curvature ``kappa`` (1/m) as its PRIMARY input and explicitly
+# defines the radius of curvature ``R(kappa) = 1/kappa`` at the top of the
+# computation. No function in this module takes the radius ``R`` as a primary
+# argument anymore; ``R`` is always derived from ``kappa``.
+# ---------------------------------------------------------------------------
+def radius_of_curvature(kappa: np.ndarray) -> np.ndarray:
+    """Radius of curvature ``R(kappa) = 1/kappa`` (m).
+
+    Args:
+        kappa: Dislocation curvature (1/m), strictly positive, any shape.
+
+    Returns:
+        Radius of curvature ``R`` in m, same shape as ``kappa``.
+    """
+    kappa = np.asarray(kappa, dtype=np.float64)
+    return 1.0 / kappa
+
+
+# ---------------------------------------------------------------------------
+# Mura self-stress: BLACK-BOX numerical input (NOT re-derived here).
+#
+# Per the project's foundational document and reviewer feedback, the mechanical
+# side is NOT re-derived inside this module. The hydrostatic self-stress of the
+# curved dislocation,
+#
+#     sigma_h^{Mura_Self}(kappa),
+#
+# is an EXTERNAL INPUT that comes from a prior numerical Mura line-integral
+# solution (solved upstream in Phase 1 / V2). It is exposed here ONLY through a
+# callable black-box interface, ``get_mura_self_stress(kappa)``, so that this
+# module never contains an analytical stress formula (no Hirth-Lothe logarithmic
+# expression, no closed-form sigma_LT). Consumers register the real numerical
+# Mura provider via :func:`set_mura_self_stress_provider`; for V1 local
+# testing a placeholder stub provider is used by default (see
+# :func:`_default_mura_self_stress`).
+# ---------------------------------------------------------------------------
+_MURA_SELF_STRESS_PROVIDER = None
+
+
+def _default_mura_self_stress(kappa: np.ndarray) -> np.ndarray:
+    """PLACEHOLDER stub Mura self-stress provider for V1 local testing.
+
+    ``sigma_h^{Mura_Self}(kappa)`` is, in the full project, the output of the
+    numerical Mura line-integral solved upstream. That numerical input is not
+    available in the V1 lightweight module, so this stub returns a
+    placeholder numerical field obtained by linear interpolation of a small
+    tabulated ``(kappa, sigma_h)`` input. The tabulated values below are a
+    STAND-IN for the real Mura-integral output and must be replaced by the
+    actual numerical solution (e.g. loaded from a Phase 1 / V2 data file) before
+    any quantitative use. The placeholder is monotone-growing with ``kappa``,
+    consistent with the physical expectation that a tighter bow (larger
+    ``kappa``) raises the self-stress.
+
+    Args:
+        kappa: Dislocation curvature (1/m), strictly positive, any shape.
+
+    Returns:
+        Placeholder hydrostatic self-stress in Pa, same shape as ``kappa``.
+    """
+    kappa = np.asarray(kappa, dtype=np.float64)
+    # Placeholder numerical input table (kappa in 1/m, sigma_h in Pa).
+    # Replace with the real numerical Mura line-integral output.
+    grid_k = np.array([2.0e5, 5.0e5, 1.0e6, 2.0e6, 3.0e6, 4.0e6, 5.0e6, 6.0e6],
+                      dtype=np.float64)
+    grid_s = np.array([2.75e7, 6.0e7, 1.05e8, 1.9e8, 2.6e8, 3.3e8, 4.3e8, 5.4e8],
+                      dtype=np.float64)
+    flat = kappa.ravel()
+    sigma = np.interp(flat, grid_k, grid_s)
+    return sigma.reshape(kappa.shape)
+
+
+def set_mura_self_stress_provider(provider) -> None:
+    """Register the numerical Mura self-stress provider (black-box).
+
+    ``provider`` must be a callable ``kappa -> sigma_h^{Mura_Self}(kappa)`` (Pa)
+    returning the hydrostatic self-stress from the numerical Mura line-integral
+    solved upstream. Once registered, :func:`get_mura_self_stress` dispatches to
+    it; until then the placeholder stub :func:`_default_mura_self_stress` is used.
+    """
+    global _MURA_SELF_STRESS_PROVIDER
+    if not callable(provider):
+        raise TypeError("Mura self-stress provider must be callable.")
+    _MURA_SELF_STRESS_PROVIDER = provider
+
+
+def get_mura_self_stress(kappa: np.ndarray) -> np.ndarray:
+    """Black-box hydrostatic Mura self-stress ``sigma_h^{Mura_Self}(kappa)`` (Pa).
+
+    This is the SOLE interface to the dislocation self-stress in the V1 module.
+    It does NOT re-derive the mechanical side: it dispatches to the registered
+    numerical Mura provider (:func:`set_mura_self_stress_provider`), falling
+    back to the placeholder stub :func:`_default_mura_self_stress` for V1 local
+    testing. The returned field is the external Mura-integral input as a function
+    of the curvature ``kappa`` (radius ``R(kappa) = 1/kappa``).
+
+    Args:
+        kappa: Dislocation curvature (1/m), strictly positive, any shape.
+
+    Returns:
+        Hydrostatic self-stress ``sigma_h^{Mura_Self}`` in Pa, same shape as ``kappa``.
+    """
+    kappa = np.asarray(kappa, dtype=np.float64)
+    provider = _MURA_SELF_STRESS_PROVIDER or _default_mura_self_stress
+    out = provider(kappa)
+    return np.asarray(out, dtype=np.float64).reshape(kappa.shape)
+
+
+def mura_self_stress(kappa: np.ndarray) -> np.ndarray:
+    """Mura self-stress tensor ``sigma_ij^self(kappa)`` of a curved dislocation.
+
+    Builds the full 3x3 stress tensor whose hydrostatic part is the external
+    Mura self-stress from :func:`get_mura_self_stress` (a black-box numerical
+    input, NOT re-derived here). The self-stress of a bowed dislocation is, to
+    leading order, isotropic-hydrostatic along the bowed segment, so
+
+        sigma_ij^self(kappa) = sigma_h^{Mura_Self}(kappa) * delta_ij .
+
+    Args:
+        kappa: Dislocation curvature (1/m), strictly positive, shape ``(...)``.
+
+    Returns:
+        Self-stress tensor of shape ``(..., 3, 3)`` in Pa.
+    """
+    sh = get_mura_self_stress(kappa)
+    eye3 = np.eye(3, dtype=np.float64)
+    return sh[..., None, None] * eye3
+
+
+def compute_total_hydrostatic_stress(
+    kappa: np.ndarray,
+) -> np.ndarray:
+    """Hydrostatic stress ``sigma_h(kappa)`` driving lattice hydrogen (Pa).
+
+    The local hydrostatic stress field at the defect is defined ENTIRELY by the
+    Mura line-integral output based on curvature. The macroscopic external
+    pressure ``P_ext`` is NOT superposed onto the microscopic dislocation
+    self-stress: ``P_ext`` only drives the boundary fugacity (through the
+    surface concentration ``C_s``), never the local hydrostatic field. Hence
+
+        R(kappa)                  = 1 / kappa
+        sigma_h(kappa)            = sigma_h^{Mura_Self}(kappa)   [external input]
+
+    with no ``P_ext`` term, and the stress-assisted lattice concentration is
+
+        c_L = C_s exp(V_H sigma_h(kappa) / (R T)) .
+
+    ``sigma_h^{Mura_Self}(kappa)`` is the hydrostatic self-stress taken as an
+    EXTERNAL INPUT from the prior numerical Mura line-integral solution (see
+    :func:`get_mura_self_stress`); the mechanical side is NOT re-derived here.
+
+    Args:
+        kappa: Dislocation curvature (1/m), strictly positive, any shape.
+
+    Returns:
+        Hydrostatic stress ``sigma_h`` in Pa, same shape as ``kappa``.
+    """
+    return get_mura_self_stress(kappa)
+
+
 def elastic_strain_energy_density(
     sigma_tensor: np.ndarray,
     mu: float = C.MU,
@@ -107,39 +270,43 @@ def line_energy(total_energy_value: float, line_length: float) -> float:
 
 
 def line_length_field(
-    R: "object",
+    kappa: "object",
     dtheta: float = C.DTHETA,
 ) -> "object":
-    """Spatial dislocation line length ``L(R) = R * dtheta`` (field, not scalar).
+    """Spatial dislocation line length ``L(kappa) = R(kappa) * dtheta`` (field).
 
-    The line length is not a scalar: for a circular-arc dislocation of radius
-    ``R`` subtending an angular span ``dtheta``, the curvilinear length is
-    ``L(R) = R * dtheta``. Returning it as a field over the spatial coordinate
-    ``R`` (rather than a single scalar) lets the energy/tension chain resolve
-    a spatially varying line length, mirroring the ``sigma_h(R)`` treatment.
+    The line length is not a scalar: for a circular-arc dislocation of curvature
+    ``kappa`` (radius ``R(kappa) = 1/kappa``) subtending an angular span
+    ``dtheta``, the curvilinear length is
 
-    ``R`` may be either a NumPy array (-> NumPy field) or a FEniCSx UFL node
+        L(kappa) = R(kappa) * dtheta = dtheta / kappa .
+
+    Returning it as a field over the spatial coordinate ``kappa`` (rather than a
+    single scalar) lets the energy/tension chain resolve a spatially varying line
+    length, mirroring the ``sigma_h(kappa)`` treatment.
+
+    ``kappa`` may be either a NumPy array (-> NumPy field) or a FEniCSx UFL node
     such as ``ufl.SpatialCoordinate`` (-> a UFL spatial field). The length is
-    computed dynamically as ``L = R * dtheta`` so that, when ``R`` is a UFL
-    expression, ``L`` automatically becomes a UFL spatial field without any
+    computed dynamically as ``L = dtheta / kappa`` so that, when ``kappa`` is a
+    UFL expression, ``L`` automatically becomes a UFL spatial field without any
     NumPy coercion.
 
     Args:
-        R: Radial distance from the notch/dislocation centre (m), either a
-            NumPy array of arbitrary shape or a UFL expression.
+        kappa: Dislocation curvature (1/m), either a NumPy array of arbitrary
+            shape or a UFL expression.
         dtheta: Angular span (rad) subtended by the arc; defaults to the
             canonical ``pi/2`` arc in :mod:`constants`.
 
     Returns:
-        Line length ``L(R)`` in m, same type/shape as ``R`` (NumPy field or
-        UFL expression).
+        Line length ``L(kappa)`` in m, same type/shape as ``kappa`` (NumPy field
+        or UFL expression).
     """
     dtheta = float(dtheta)
-    # UFL expressions (FEniCSx) and other non-NumPy operands: multiply directly
-    # so L becomes a UFL spatial field when R is a UFL node (no np.asarray).
-    if isinstance(R, np.ndarray):
-        return np.asarray(R, dtype=np.float64) * dtheta
-    return R * dtheta
+    # UFL expressions (FEniCSx) and other non-NumPy operands: divide directly so
+    # L becomes a UFL spatial field when kappa is a UFL node (no np.asarray).
+    if isinstance(kappa, np.ndarray):
+        return dtheta / np.asarray(kappa, dtype=np.float64)
+    return dtheta / kappa
 
 
 def line_tension(
@@ -213,7 +380,8 @@ def line_tension_chain(
         theta_t_fields: Per-kappa trap occupancy ``(K, ...)`` (dimensionless).
         volumes: Volume weights ``dV`` of shape ``(...)`` in m^3 (broadcast over
             the leading ``K`` axis).
-        line_lengths: ``L(kappa)`` in m, shape ``(K,)``.
+        line_lengths: ``L(kappa) = R(kappa) * dtheta`` in m, shape ``(K,)``,
+            with ``R(kappa) = 1/kappa`` (see :func:`radius_of_curvature`).
         kappas: Monotone ``kappa`` grid, shape ``(K,)``.
         temperature: Absolute temperature in Kelvin.
         mu: Shear modulus in Pa.
@@ -244,6 +412,11 @@ def line_tension_chain(
 
 
 __all__: Tuple[str, ...] = (
+    "radius_of_curvature",
+    "get_mura_self_stress",
+    "set_mura_self_stress_provider",
+    "mura_self_stress",
+    "compute_total_hydrostatic_stress",
     "elastic_strain_energy_density",
     "total_free_energy_density",
     "integrate_energy_density",

@@ -17,9 +17,18 @@ The free-energy chain implemented here is:
     4. Oriani trap equilibrium  -> theta_T(k) from theta_L = c_L / N_L
     5. Configurational free energy  -> Psi_conf(c_L)
     6. Trap-binding free energy     -> Psi_trap(theta_T)
-    7. Mechanical line energy       -> E_mech(k) = mu b^2/(4 pi (1-nu)) ln(1/(k r_c))
+    7. Total hydrostatic stress + mechanical line energy
+         R(k)                  = 1/kappa
+         sigma_h(k)            = sigma_h^{Mura_Self}(k)   [external numerical input]
+         (NO P_ext superposition: P_ext only drives the boundary fugacity C_s)
+         Gamma_mech(k)         = mu b^2/(4 pi (1-nu)) * ln(R(k)/r_c)
     8. Hydrogen line-energy reduction  -> Gamma_H(k) (closed form, Kirchheim)
+         c_L(k) = C_s exp(V_H sigma_h(k) / (R T))   (sigma_h = Mura self-stress only)
     9. Total line tension             -> Gamma(k) = Gamma_mech(k) + Gamma_H(k)
+
+Every stress and energy function below is parameterised by the dislocation
+curvature ``kappa`` (1/m); the radius of curvature ``R(kappa) = 1/kappa`` is
+defined explicitly at the start of each calculation.
 
 The hydrogen-induced reduction Gamma_H < 0 is the degradation mechanism: it
 lowers the line tension of a curved (bowing) dislocation, increasing its
@@ -55,6 +64,14 @@ import matplotlib.pyplot as plt
 
 import constants as C
 import hydrogen as H
+import line_tension as LT
+from line_tension import (
+    radius_of_curvature,
+    get_mura_self_stress,
+    set_mura_self_stress_provider,
+    mura_self_stress,
+    compute_total_hydrostatic_stress,
+)
 
 # ===========================================================================
 # Fixed Version-1 thermodynamic state (the proof operating point).
@@ -107,9 +124,11 @@ def mechanical_line_tension(kappa: np.ndarray) -> np.ndarray:
 
     In the line-tension approximation (standard in dislocation dynamics, see
     Hirth & Lothe), the restoring line tension equals the line energy per unit
-    length. For a bowed edge dislocation of radius of curvature ``R = 1/kappa``,
+    length. For a bowed edge dislocation of curvature ``kappa`` (radius of
+    curvature ``R(kappa) = 1/kappa``),
 
-        Gamma_mech(k) = E_mech(R) = mu b^2 / (4 pi (1 - nu)) * ln(R / r_c) ,
+        R(k)        = 1/kappa
+        Gamma_mech(k) = mu b^2 / (4 pi (1 - nu)) * ln(R(k) / r_c) ,
 
     with the dislocation core radius ``r_c = b``. ``Gamma_mech`` diverges as
     ``k -> 0`` (straight line) and vanishes as ``k -> 1/r_c`` (core limit).
@@ -121,50 +140,31 @@ def mechanical_line_tension(kappa: np.ndarray) -> np.ndarray:
         Mechanical line tension ``Gamma_mech`` in J/m (= N), shape ``(K,)``.
     """
     kappa = np.asarray(kappa, dtype=np.float64)
+    R = radius_of_curvature(kappa)            # R(kappa) = 1/kappa (m)
     pre = C.MU * C.BURGERS_B ** 2 / (4.0 * np.pi * (1.0 - C.NU))
-    return pre * np.log(1.0 / (kappa * C.CORE_RADIUS))
+    return pre * np.log(R / C.CORE_RADIUS)
 
 
 # ---------------------------------------------------------------------------
-# Step 3 (stress field): hydrostatic field of an edge dislocation.
-# The tensile hydrostatic stress of an edge dislocation (Hirth & Lothe) is
-#   sigma_h(r) = A / r ,   A = mu b / (2 pi (1 - nu)) ,
-# sampled on a radial line at the angle of maximum tension. The curvature
-# radius R = 1/kappa sets the outer cutoff of the hydrogen atmosphere: a
-# tighter bow (larger k) confines the atmosphere to a smaller, more stressed
-# near-core region. The ``r + r_c`` regularisation removes the r -> 0
-# singularity at the core.
+# Dislocation self-stress: BLACK-BOX external input.
+#
+# Per the project foundational document, the mechanical side is NOT re-derived
+# here. The hydrostatic self-stress ``sigma_h^{Mura_Self}(kappa)`` is an
+# external input from the prior numerical Mura line-integral solution, exposed
+# through :func:`line_tension.get_mura_self_stress`. No analytical stress
+# formula (Hirth-Lothe log, sigma_LT, 1/r edge field) is used in this module.
+#
+# The local hydrostatic stress driving hydrogen accumulation at the defect is
+# defined ENTIRELY by the Mura line-integral output based on curvature:
+#
+#     sigma_h(kappa) = sigma_h^{Mura_Self}(kappa) .
+#
+# The macroscopic external pressure P_ext is NOT superposed onto the
+# microscopic dislocation self-stress (that would be a physical redundancy):
+# P_ext only drives the boundary fugacity through the surface concentration
+# C_s (Sieverts/Abel-Noble), never the local hydrostatic field. See
+# :func:`line_tension.compute_total_hydrostatic_stress`.
 # ---------------------------------------------------------------------------
-def edge_hydrostatic_stress(r: np.ndarray) -> np.ndarray:
-    """Hydrostatic stress field of an edge dislocation, ``sigma_h(r) = A/r``.
-
-    Args:
-        r: Radial distance from the core (m), shape ``(...)``.
-
-    Returns:
-        Hydrostatic stress in Pa (positive in tension), same shape as ``r``.
-    """
-    r = np.asarray(r, dtype=np.float64)
-    A = C.MU * C.BURGERS_B / (2.0 * np.pi * (1.0 - C.NU))
-    return A / (r + C.CORE_RADIUS)
-
-
-def line_tension_stress(kappa: np.ndarray) -> np.ndarray:
-    """Curvature-induced line-tension back-stress ``sigma_LT(k)`` (Pa, tensile).
-
-    A bowed edge dislocation carries an additional line-tension hydrostatic
-    stress that scales linearly with the curvature,
-
-        sigma_LT(k) = mu b k / (2 (1 - nu)) ,
-
-    and is sampled at the core where it enriches the hydrogen atmosphere. This
-    is the term that makes the hydrogen line-tension reduction grow with
-    curvature: a tighter bow (larger k) raises sigma_LT, enlarges the
-    stress-assisted enrichment ``exp(Omega sigma / (R T))``, and deepens the
-    reduction - the core of the line-tension degradation theory.
-    """
-    kappa = np.asarray(kappa, dtype=np.float64)
-    return C.MU * C.BURGERS_B * kappa / (2.0 * (1.0 - C.NU))
 
 
 # ---------------------------------------------------------------------------
@@ -174,56 +174,62 @@ def line_tension_stress(kappa: np.ndarray) -> np.ndarray:
 def hydrogen_line_energy(kappa: float, n_radial: int = 2048) -> float:
     """Excess hydrogen line energy ``E_H(k)`` (J/m) for one curvature.
 
-    Integrates the *excess* hydrogen free-energy density ``Psi_H - Psi_H^ref``
-    (steps 5-6) over the cylindrical atmosphere of an edge dislocation, per
-    unit line length, on a logarithmic radial grid from the core radius
-    ``r_c = b`` out to a FIXED outer cutoff ``R_atm`` (the mean dislocation
-    spacing ``1/sqrt(rho_0)``, i.e. the atmosphere overlap scale):
+    The lattice hydrogen concentration is driven DIRECTLY by the local
+    hydrostatic stress, which is defined ENTIRELY by the Mura line-integral
+    output based on curvature (a scalar function of ``kappa`` only, uniform
+    over the atmosphere, with NO ``P_ext`` superposition):
 
-        E_H(k) = integral_{r_c}^{R_atm} [Psi_H(r,k) - Psi_H^ref] * 2 pi r dr ,
+        R(k)                    = 1/kappa
+        sigma_h(k)              = sigma_h^{Mura_Self}(k)   [external numerical input]
+        c_L(k)                  = C_s * exp(V_H sigma_h(k) / (R T)) ,
 
-    with ``dV/L = 2 pi r dr`` the cylindrical-shell volume per unit line
-    length. The reference ``Psi_H^ref`` is the stress-free bulk hydrogen
-    free-energy density (``c_L = C_s``, no dislocation stress), so ``E_H``
-    captures only the DISLOCATION-INDUCED excess hydrogen free energy.
+    where ``sigma_h^{Mura_Self}(kappa)`` is the external Mura line-integral
+    self-stress (a black-box input, NOT re-derived here), and ``C_s`` is the
+    Sieverts surface concentration that already carries the boundary fugacity
+    (hence ``P_ext``) through the Abel-Noble real-gas EOS.
 
-    The driving hydrostatic stress is the sum of the static edge field and the
-    curvature-induced line-tension back-stress (step 3),
+    The excess hydrogen free-energy density ``Psi_H(c_L) - Psi_H^ref`` is
+    spatially uniform and integrates analytically over the cylindrical
+    atmosphere (per unit line length) of cross-section
+    ``A_atm = pi (R_atm^2 - r_c^2)`` with ``R_atm = 1/sqrt(rho_0)`` the mean
+    dislocation spacing:
 
-        sigma_h(r, k) = A / (r + r_c) + sigma_LT(k) ,
-        sigma_LT(k)   = mu b k / (2 (1 - nu)) ,
+        E_H(k) = [Psi_H(c_L(k)) - Psi_H^ref] * A_atm .
 
-    so the lattice concentration ``c_L(r,k) = C_s exp(Omega sigma_h / (R T))``
-    and the Oriani trap occupancy ``theta_T(r,k)`` (step 4) both grow with
-    curvature. Because the trap-binding term ``Psi_trap = -Delta G_b * c_T`` is
-    negative and grows with the stress-driven enrichment, ``E_H < 0`` and
-    becomes more negative as ``k`` increases: hydrogen binding lowers the line
-    energy, and the effect deepens with curvature.
+    The reference ``Psi_H^ref`` is the ZERO-stress state (no dislocation
+    self-stress, ``sigma_h = 0``), i.e. ``c_ref = C_s`` (the surface
+    concentration itself), so ``E_H`` isolates the DISLOCATION-INDUCED excess:
+    ``E_H -> 0`` as ``k -> 0`` (straight line, ``sigma_h^{Mura_Self} -> 0``) and
+    becomes more negative as ``k`` increases (tighter bowing raises
+    ``sigma_h``, enriches the lattice, and deepens the trap-binding reduction)
+    - the core of the line-tension degradation theory.
 
     Args:
         kappa: Dislocation curvature (1/m), strictly positive.
-        n_radial: Number of logarithmic radial quadrature points.
+        n_radial: Unused (kept for API compatibility); the stress is uniform.
 
     Returns:
         Hydrogen line energy ``E_H`` in J/m (<= 0).
     """
-    R_atm = 1.0 / float(np.sqrt(C.RHO_0))  # mean dislocation spacing (m)
-    r = np.geomspace(C.CORE_RADIUS, R_atm, n_radial)
-    # A bowed dislocation under line tension carries an additional tensile
-    # hydrostatic stress along its length (the line tension pulls on the
-    # segment endpoints); to first order this acts uniformly over the
-    # hydrogen atmosphere and is superposed on the static 1/r edge field.
-    sigma_h = edge_hydrostatic_stress(r) + line_tension_stress(kappa)
-    c_lattice = stress_assisted_lattice_concentration(sigma_h)
-    theta_t = H.oriani_trap_occupancy(c_lattice, T_FIXED)
-    psi_h = H.hydrogen_free_energy_density(c_lattice, theta_t, T_FIXED)
-    # Stress-free bulk reference: c_L = C_s, no hydrostatic stress enrichment.
-    c_ref = np.full_like(r, H.surface_concentration(T_FIXED))
-    theta_ref = H.oriani_trap_occupancy(c_ref, T_FIXED)
-    psi_ref = H.hydrogen_free_energy_density(c_ref, theta_ref, T_FIXED)
-    # Trapezoidal integration of the excess density * 2 pi r dr (per unit length).
-    integrand = (psi_h - psi_ref) * 2.0 * np.pi * r
-    return float(np.trapezoid(integrand, r))
+    _ = n_radial  # stress is uniform in space; no radial quadrature needed.
+    R_atm = 1.0 / float(np.sqrt(C.RHO_0))            # mean dislocation spacing (m)
+    r_c = C.CORE_RADIUS
+    A_atm = float(np.pi * (R_atm ** 2 - r_c ** 2))    # atmosphere cross-section per unit length
+
+    # Local hydrostatic stress: Mura self-stress ONLY (no P_ext superposition).
+    sigma_h = float(compute_total_hydrostatic_stress(kappa))
+    # Stress-assisted lattice concentration driven by sigma_h (Mura only).
+    c_lattice = float(stress_assisted_lattice_concentration(np.array(sigma_h)))
+    theta_t = float(H.oriani_trap_occupancy(np.array(c_lattice), T_FIXED))
+    psi_h = float(H.hydrogen_free_energy_density(np.array(c_lattice), np.array(theta_t), T_FIXED))
+
+    # Reference: ZERO dislocation self-stress (sigma_h = 0) -> c_ref = C_s.
+    # Isolates the dislocation-induced excess so E_H -> 0 as kappa -> 0.
+    c_ref = float(H.surface_concentration(T_FIXED))
+    theta_ref = float(H.oriani_trap_occupancy(np.array(c_ref), T_FIXED))
+    psi_ref = float(H.hydrogen_free_energy_density(np.array(c_ref), np.array(theta_ref), T_FIXED))
+
+    return (psi_h - psi_ref) * A_atm
 
 
 def hydrogen_line_tension(kappa: np.ndarray, n_radial: int = 2048) -> np.ndarray:
@@ -231,22 +237,23 @@ def hydrogen_line_tension(kappa: np.ndarray, n_radial: int = 2048) -> np.ndarray
 
     In the line-tension approximation (``Gamma ~ E``, standard in dislocation
     mobility), the hydrogen contribution to the line tension equals the
-    excess hydrogen line energy ``E_H(k)`` from :func:`hydrogen_line_energy`.
-    Because the trap-binding term lowers the free energy and the stress-driven
-    enrichment grows with curvature, ``Gamma_H <= 0`` and becomes more negative
-    as ``k`` increases: hydrogen binding degrades (lowers) the line tension,
-    and the degradation deepens with curvature - the core of the line-tension
-    degradation theory.
+    excess hydrogen line energy ``E_H(k)`` from :func:`hydrogen_line_energy`,
+    driven by the local hydrostatic stress ``sigma_h(k)`` (Mura self-stress
+    only, no ``P_ext`` superposition). Because the trap-binding term lowers the
+    free energy and the stress-driven enrichment grows with curvature,
+    ``Gamma_H <= 0`` and becomes more negative as ``k`` increases: hydrogen
+    binding degrades (lowers) the line tension, and the degradation deepens
+    with curvature - the core of the line-tension degradation theory.
 
     Args:
         kappa: Dislocation curvature (1/m), shape ``(K,)``.
-        n_radial: Number of radial quadrature points per curvature.
+        n_radial: Unused (kept for API compatibility); the stress is uniform.
 
     Returns:
         Hydrogen line-tension reduction ``Gamma_H`` in J/m (<= 0), shape ``(K,)``.
     """
     kappa = np.asarray(kappa, dtype=np.float64)
-    return np.array([hydrogen_line_energy(k, n_radial) for k in kappa])
+    return np.array([hydrogen_line_energy(k, n_radial=n_radial) for k in kappa])
 
 
 def total_line_tension(kappa: np.ndarray) -> tuple:
@@ -293,21 +300,33 @@ def report_state(state: dict) -> None:
 
 
 def report_line_tension(kappa: np.ndarray, g_mech, g_h, g_tot) -> None:
-    """Print a compact curvature / line-tension table at sampled curvatures."""
-    print(f"{'kappa [1/m]':>14} {'R [nm]':>10} {'Gamma_mech [nN]':>16} "
-          f"{'Gamma_H [nN]':>14} {'Gamma [nN]':>12}")
-    print("-" * 72)
+    """Print a compact curvature / stress / line-tension table.
+
+    All quantities are parameterised by the curvature ``kappa`` (1/m); the
+    radius ``R(kappa) = 1/kappa`` and the local hydrostatic stress
+    ``sigma_h(kappa) = sigma_h^{Mura_Self}(kappa)`` (Mura self-stress ONLY, no
+    ``P_ext`` superposition, dynamically scaling with ``kappa``) are listed
+    alongside the line-tension split.
+    """
+    print(f"{'kappa [1/m]':>14} {'R [nm]':>10} {'sigma_h [GPa]':>16} "
+          f"{'Gamma_mech [nN]':>16} {'Gamma_H [nN]':>14} {'Gamma [nN]':>12}")
+    print("-" * 88)
     # Sample logarithmically across the grid for a readable table.
     idx = np.logspace(np.log10(1), np.log10(len(kappa)), num=8).astype(int) - 1
     idx = np.clip(idx, 0, len(kappa) - 1)
+    sh = compute_total_hydrostatic_stress(kappa)   # sigma_h(k) = Mura self-stress (Pa)
     for i in idx:
         r_nm = 1.0 / kappa[i] * 1e9
-        print(f"{kappa[i]:14.3e} {r_nm:10.2f} {g_mech[i] * 1e9:16.4f} "
-              f"{g_h[i] * 1e9:14.4f} {g_tot[i] * 1e9:12.4f}")
-    print("=" * 72)
+        print(f"{kappa[i]:14.3e} {r_nm:10.2f} {sh[i] / 1e9:16.4f} "
+              f"{g_mech[i] * 1e9:16.4f} {g_h[i] * 1e9:14.4f} {g_tot[i] * 1e9:12.4f}")
+    print("=" * 88)
+    print("  sigma_h(kappa) = sigma_h^{Mura_Self}(kappa),  R(kappa) = 1/kappa")
+    print("  sigma_h^{Mura_Self}(kappa): external numerical input (Mura line-integral), NOT re-derived")
+    print("  NO P_ext superposition: P_ext only drives the boundary fugacity C_s (Abel-Noble/Sieverts).")
+    print("  c_L = C_s * exp(V_H sigma_h / (R T))  (sigma_h = Mura self-stress, scales with kappa)")
     print("  Gamma_H < 0 confirms hydrogen-induced line-tension DEGRADATION.")
     print("  Larger kappa (tighter bowing) -> deeper reduction (line-tension degradation).")
-    print("=" * 72)
+    print("=" * 88)
 
 
 # ---------------------------------------------------------------------------
@@ -329,9 +348,10 @@ def plot_line_tension(kappa, g_mech, g_h, g_tot, out_path: str) -> None:
     ax.set_xlabel(r"Dislocation curvature  $\kappa = 1/R$  (m$^{-1}$)", fontsize=12)
     ax.set_ylabel(r"Line tension  $\Gamma$  (nN)", fontsize=12)
     ax.set_title(
-        r"H-induced line-tension degradation (30CrMo, "
-        f"$T={T_FIXED - 273.15:.0f}^\\circ$C, $P={P_FIXED / 1e6:.0f}$ MPa)",
-        fontsize=11,
+        r"H-induced line-tension degradation, $\sigma_h(\kappa)=\sigma_h^{\mathrm{Mura}}(\kappa)$"
+        r" (no $P_{\mathrm{ext}}$ superposition), 30CrMo, "
+        f"$T={T_FIXED - 273.15:.0f}^\\circ$C, $P_{{\\mathrm{{ext}}}}={P_FIXED / 1e6:.0f}$ MPa)",
+        fontsize=10,
     )
     ax.legend(loc="best", frameon=True, fontsize=10)
     ax.grid(True, which="both", ls=":", lw=0.5, alpha=0.6)
@@ -350,14 +370,17 @@ def main() -> None:
     state = thermodynamic_state()
     report_state(state)
 
-    # Curvature grid: from ~straight (R ~ 5 um) to the near-core elastic limit.
-    # The upper bound is set by lattice saturation: the combined edge + line-
-    # tension stress drives c_L toward N_L, beyond which the configurational
-    # entropy diverges (core artifact). kappa ~ 1e8 1/m (R ~ 10 nm) keeps the
-    # peak lattice occupancy well below unity and the continuum elastic regime
-    # intact.
+    # Curvature grid: from ~straight (R ~ 5 um) to the elastic limit where the
+    # total line tension is still positive. The local hydrostatic stress
+    # sigma_h(kappa) = sigma_h^{Mura_Self}(kappa) (Mura self-stress ONLY, NO
+    # P_ext superposition) drives the lattice concentration
+    # c_L = C_s exp(V_H sigma_h / (R T)); the configurational free-energy excess
+    # keeps Gamma_mech + Gamma_H positive only up to kappa ~ 7.1e6 1/m. The
+    # upper bound kappa_max = 6.0e6 (R ~ 167 nm) keeps Gamma_total safely above
+    # zero while resolving the full degradation trend, with the peak lattice
+    # occupancy well below unity (continuum elastic regime).
     kappa_min = 1.0 / (5.0e-6)          # R = 5 um  -> kappa ~ 2e5 1/m
-    kappa_max = 3.0e7                    # R = 33 nm -> elastic, unsaturated, Gamma > 0
+    kappa_max = 6.0e6                   # R ~ 167 nm -> elastic, unsaturated, Gamma > 0
     kappa = np.logspace(np.log10(kappa_min), np.log10(kappa_max), 80)
 
     g_mech, g_h, g_tot = total_line_tension(kappa)
